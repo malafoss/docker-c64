@@ -56,13 +56,23 @@ static void catch_sigint(int signo) {
 }
 
 // conversion table from C64 font index to UTF-8
-static const char *font_map[] = {
+static const char *font_map_upper[] = {
     "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", // 0
     "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "[", "£", "]", "↑", "←", // 16
     " ", "!", "\"", "#", "$", "%", "&", "´", "(", ")", "*", "+", ",", "-", ".", "/", // 32
     "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "<", "=", ">", "?", // 48
     "🭸", "♠", "🭳", "🭸", "🭸", "🭷", "🭺", "🭲", "🭴", "╮", "╰", "╯", "🭼", "╲", "╱", "🭽", // 64
     "🭾", "●", "🭻", "♥", "┃", "╭", "╳", "○", "♣", "┃", "♦", "╋", "🮌", "┃", "π", "◥", // 80
+    " ", "▌", "▄", "▔", "▁", "▏", "🮐", "🭵", "🮏", "◤", "🭵", "┣", "▗", "┗", "┓", "▁", // 96
+    "┏", "┻", "┳", "┫", "▏", "▍", "🮈", "🮃", "▀", "▃", "🭿", "▖", "▝", "┛", "▘", "▚", // 112
+};
+static const char *font_map_lower[] = {
+    "@", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", // 0
+    "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "[", "£", "]", "↑", "←", // 16
+    " ", "!", "\"", "#", "$", "%", "&", "´", "(", ")", "*", "+", ",", "-", ".", "/", // 32
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "<", "=", ">", "?", // 48
+    "🭸", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", // 64
+    "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "╋", "🮌", "┃", "π", "◥", // 80
     " ", "▌", "▄", "▔", "▁", "▏", "🮐", "🭵", "🮏", "◤", "🭵", "┣", "▗", "┗", "┓", "▁", // 96
     "┏", "┻", "┳", "┫", "▏", "▍", "🮈", "🮃", "▀", "▃", "🭿", "▖", "▝", "┛", "▘", "▚", // 112
 };
@@ -123,6 +133,8 @@ int main(int argc, char* argv[]) {
     keypad(stdscr, TRUE);
     attron(A_BOLD);
 
+    bool isLower = false;
+
     // run the emulation/input/render loop
     while (!quit_requested) {
         // tick the emulator for 1 frame
@@ -132,13 +144,27 @@ int main(int argc, char* argv[]) {
         int ch = getch();
         if (ch != ERR) {
             switch (ch) {
-                case 10:  ch = 0x0D; break; // ENTER
-                case KEY_BACKSPACE: ch = 0x01; break; // BACKSPACE
-                case 27:  ch = 0x03; break; // ESCAPE
-                case 260: ch = 0x08; break; // LEFT
-                case 261: ch = 0x09; break; // RIGHT
-                case 259: ch = 0x0B; break; // UP
-                case 258: ch = 0x0A; break; // DOWN
+                case 10:  ch = C64_KEY_RETURN; break; // ENTER
+                case KEY_BACKSPACE: ch = C64_KEY_DEL; break;
+                case 27:  ch = C64_KEY_STOP; break; // ESCAPE
+                case KEY_LEFT: ch = C64_KEY_CSRLEFT; break;
+                case KEY_RIGHT: ch = C64_KEY_CSRRIGHT; break;
+                case KEY_UP: ch = C64_KEY_CSRUP; break;
+                case KEY_DOWN: ch = C64_KEY_CSRDOWN; break;
+                case KEY_IC: ch = C64_KEY_INST; break;
+                case KEY_HOME: ch = C64_KEY_HOME; break;
+                case KEY_DC: ch = C64_KEY_CLR; break;
+                case KEY_STAB: ch = C64_KEY_RUN; break;
+                case '|': ch = C64_KEY_LEFT; break;
+                case KEY_F(1): ch = C64_KEY_F1; break;
+                case KEY_F(2): ch = C64_KEY_F2; break;
+                case KEY_F(3): ch = C64_KEY_F3; break;
+                case KEY_F(4): ch = C64_KEY_F4; break;
+                case KEY_F(5): ch = C64_KEY_F5; break;
+                case KEY_F(6): ch = C64_KEY_F6; break;
+                case KEY_F(7): ch = C64_KEY_F7; break;
+                case KEY_F(8): ch = C64_KEY_F8; break;
+                case KEY_END: isLower = !isLower; break;
             }
             if (ch > 32) {
                 if (islower(ch)) {
@@ -186,7 +212,7 @@ int main(int argc, char* argv[]) {
                     // get character index
                     uint16_t addr = 0x0400 + y*40 + x;
                     uint8_t font_code = mem_rd(&c64.mem_vic, addr);
-                    const char *chr = font_map[font_code & 127];
+                    const char *chr = (isLower ? font_map_lower : font_map_upper)[font_code & 127];
 
                     // invert upper half of character set
                     if (font_code > 127) {
