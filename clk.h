@@ -8,7 +8,7 @@
     ~~~C
     #define CHIPS_IMPL
     ~~~
-    before you include this file in *one* C or C++ file to create the 
+    before you include this file in *one* C file to create the
     implementation.
 
     Optionally provide the following macros with your own implementation
@@ -21,45 +21,9 @@
     ## Functions
 
     ~~~C
-    void clk_init(clk_t* clk, uint32_t freq_hz)
+    uint32_t clk_us_to_ticks(uint64_t freq_hz, uint32_t micro_seconds)
     ~~~
-        Initialize a clk_t instance with a frequency in Hz.
-
-    ~~~C
-    uint32_t clk_ticks_to_run(clk_t* clk, uint32_t micro_seconds)
-    ~~~
-        Compute the number of ticks to execute for the given number of micro-seconds.
-        Usually this is called once per frame to compute the required
-        number of ticks for a CPU emulator to run in realtime.
-
-    ~~~C
-    void clk_ticks_executed(clk_t* clk, uint32_t ticks)
-    ~~~
-        Call this function after the CPU emulator has executed ticks 
-        with the actual number of ticks executed by the emulator. 
-        This computes the number of 'overrun ticks' to be subtracted
-        from the number of ticks to execute in the next call to
-        clk_ticks_to_tun().
-
-    ## Example
-
-    For a Z80 system running a 2 MHz initialize a clk_t instance like
-    this:
-
-    ~~~C
-        clk_t clk;
-        clk_init(&clk, 2000000);
-    ~~~
-
-    Then in the per-frame callback, you can call the z80_exec() function
-    like this to run the emulated system at the right speed:
-
-    ~~~C
-    double frame_time_in_seconds = ...;
-    uint32_t ticks_to_run = clk_ticks_to_run(&clk, frame_time_in_seconds));
-    uint32_t ticks_executed = z80_exec(&cpu, ticks_to_run);
-    clk_ticks_executed(&clk, ticks_executed);
-    ~~~
+        Convert micro-seconds to system ticks.
 
     ## zlib/libpng license
 
@@ -85,18 +49,8 @@
 extern "C" {
 #endif
 
-typedef struct {
-    int64_t freq_hz;
-    int ticks_to_run;
-    int overrun_ticks;
-} clk_t;
-
-/* setup a clock instance with a frequency in Hz */
-extern void clk_init(clk_t* clk, uint32_t freq_hz);
-/* call once per frame to compute number of ticks to execute */
-extern uint32_t clk_ticks_to_run(clk_t* clk, uint32_t micro_seconds);
-/* call once per frame with actual number of executed ticks */
-extern void clk_ticks_executed(clk_t* clk, uint32_t ticks);
+// helper func to convert micro_seconds into ticks
+uint32_t clk_us_to_ticks(uint64_t freq_hz, uint32_t micro_seconds);
 
 #ifdef __cplusplus
 } /* extern "C" */
@@ -104,39 +58,12 @@ extern void clk_ticks_executed(clk_t* clk, uint32_t ticks);
 
 /*-- IMPLEMENTATION ----------------------------------------------------------*/
 #ifdef CHIPS_IMPL
-#include <string.h>
-#ifndef CHIPS_DEBUG
-    #ifdef _DEBUG
-        #define CHIPS_DEBUG
-    #endif
-#endif
 #ifndef CHIPS_ASSERT
     #include <assert.h>
     #define CHIPS_ASSERT(c) assert(c)
 #endif
 
-void clk_init(clk_t* clk, uint32_t freq_hz) {
-    CHIPS_ASSERT(clk && (freq_hz > 1));
-    memset(clk, 0, sizeof(clk_t));
-    clk->freq_hz = freq_hz;
-}
-
-uint32_t clk_ticks_to_run(clk_t* clk, uint32_t micro_seconds) {
-    CHIPS_ASSERT(clk && (micro_seconds > 0));
-    int ticks = (int) ((clk->freq_hz * micro_seconds) / 1000000);
-    clk->ticks_to_run = ticks - clk->overrun_ticks;
-    if (clk->ticks_to_run < 1) {
-        clk->ticks_to_run = 1;
-    }
-    return clk->ticks_to_run;
-}
-
-void clk_ticks_executed(clk_t* clk, uint32_t ticks_executed) {
-    if ((int)ticks_executed > clk->ticks_to_run) {
-        clk->overrun_ticks = (int)ticks_executed - clk->ticks_to_run;
-    }
-    else {
-        clk->overrun_ticks = 0;
-    }
+uint32_t clk_us_to_ticks(uint64_t freq_hz, uint32_t micro_seconds) {
+    return (uint32_t) ((freq_hz * micro_seconds) / 1000000);
 }
 #endif

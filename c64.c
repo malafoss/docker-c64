@@ -15,6 +15,7 @@
 #include <locale.h>
 #include <wchar.h>
 #define CHIPS_IMPL
+#include "chips_common.h"
 #include "m6502.h"
 #include "m6526.h"
 #include "m6569.h"
@@ -23,6 +24,9 @@
 #include "kbd.h"
 #include "mem.h"
 #include "clk.h"
+#include "c1530.h"
+#include "m6522.h"
+#include "c1541.h"
 #include "c64.h"
 #include "c64-roms.h"
 
@@ -44,9 +48,10 @@ static c64_t c64;
 #define SET_POS_STR(x,y,s) mvaddch((y), (x)*CHAR_WIDTH+1, ' '); mvaddstr((y), (x)*CHAR_WIDTH, s);
 #endif
 
-// a signal handler for Ctrl-C, for proper cleanup 
+// a signal handler for Ctrl-C, for proper cleanup
 static int quit_requested = 0;
 static void catch_sigint(int signo) {
+    (void)signo;
     quit_requested = 1;
 }
 
@@ -93,13 +98,13 @@ static void init_c64_colors(void) {
 }
 
 int main(int argc, char* argv[]) {
+    (void)argc; (void)argv;
     c64_init(&c64, &(c64_desc_t){
-        .rom_char = dump_c64_char,
-        .rom_char_size = sizeof(dump_c64_char),
-        .rom_basic = dump_c64_basic,
-        .rom_basic_size = sizeof(dump_c64_basic),
-        .rom_kernal = dump_c64_kernalv3,
-        .rom_kernal_size = sizeof(dump_c64_kernalv3)
+        .roms = {
+            .chars = { .ptr=dump_c64_char_bin, .size=sizeof(dump_c64_char_bin) },
+            .basic = { .ptr=dump_c64_basic_bin, .size=sizeof(dump_c64_basic_bin) },
+            .kernal = { .ptr=dump_c64_kernalv3_bin, .size=sizeof(dump_c64_kernalv3_bin) }
+        }
     });
 
     // install a Ctrl-C signal handler
@@ -118,7 +123,7 @@ int main(int argc, char* argv[]) {
     keypad(stdscr, TRUE);
     attron(A_BOLD);
 
-    // run the emulation/input/render loop 
+    // run the emulation/input/render loop
     while (!quit_requested) {
         // tick the emulator for 1 frame
         c64_exec(&c64, FRAME_USEC);
@@ -150,8 +155,8 @@ int main(int argc, char* argv[]) {
         }
         // render the PETSCII buffer
         int cur_color_pair = -1;
-        int bg = c64.vic.gunit.bg_index[0];
-        int bc = c64.vic.brd.bc_index;
+        int bg = c64.vic.gunit.bg[0] & 0xF;
+        int bc = c64.vic.brd.bc & 0xF;
         for (uint32_t yy = 0; yy < 25+2*BORDER_VERT; yy++) {
             for (uint32_t xx = 0; xx < 40+2*BORDER_HORI; xx++) {
                 if ((xx < BORDER_HORI) || (xx >= 40+BORDER_HORI) ||
