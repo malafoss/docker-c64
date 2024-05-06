@@ -1,6 +1,6 @@
 FROM docker.io/gcc:13 AS build
 COPY ./c64.c ./*.h .
-ENV GCCFLAGS="-flto=auto -O3 -fdata-sections -ffunction-sections -s -static -Wl,--gc-sections -Wl,--strip-all -Wl,-z,norelro -Wl,--build-id=none -Wl,-O1"
+ENV GCCFLAGS="-O3 -fwhole-program -fweb -fdata-sections -ffunction-sections -s -static -Wl,--gc-sections -Wl,--strip-all -Wl,-z,norelro -Wl,--build-id=none -Wl,-O1"
 RUN gcc c64.c -o c64 $GCCFLAGS -lncursesw -ltinfo
 RUN localedef --delete-from-archive `localedef --list-archive` && \
     localedef --add-to-archive /usr/lib/locale/C.utf8

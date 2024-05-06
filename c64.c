@@ -5,15 +5,20 @@
 */
 #define _XOPEN_SOURCE_EXTENDED
 #define _XOPEN_SOURCE
+#define _POSIX_C_SOURCE 199309L
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <ncursesw/ncurses.h>
 #include <unistd.h>
 #include <ctype.h>
 #include <signal.h>
 #include <locale.h>
 #include <wchar.h>
+#include <time.h>
 #define CHIPS_IMPL
 #include "chips_common.h"
 #include "m6502.h"
@@ -107,6 +112,60 @@ static void init_c64_colors(void) {
     }
 }
 
+static bool load_file_name(const char *filename) {
+    // map file to memory
+    int fd = open(filename, O_RDONLY);
+    if (fd == -1) return false;
+    struct stat sb;
+    if (fstat(fd, &sb) == -1) { close(fd); return false; }
+    off_t size = sb.st_size;
+    void *ptr = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (ptr == MAP_FAILED) { close(fd); return false; }
+
+    // load from memory
+    bool rc = c64_quickload(&c64, (chips_range_t){
+        .size = size,
+        .ptr = ptr
+    });
+
+    // cleanup
+    munmap(ptr, size);
+    close(fd);
+    return rc;
+}
+
+static bool load_file(void) {
+    const char *filename = "file.prg";
+    return load_file_name(filename);
+}
+
+static bool save_file_name(const char *filename, uint16_t ptr, uint16_t endptr) {
+    // open or create file
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd == -1) return false;
+
+    // write header
+    uint8_t lobyte = (uint8_t)ptr;
+    uint8_t hibyte = (uint8_t)(ptr>>8);
+    if (write(fd, &lobyte, 1) == -1 || write(fd, &hibyte, 1) == -1) { close(fd); return false; }
+
+    // write data
+    while (ptr < endptr) {
+        uint8_t byte = mem_rd(&c64.mem_cpu, ptr++);
+        if (write(fd, &byte, 1) == -1) { close(fd); return false; }
+    }
+
+    // cleanup
+    return close(fd) == 0;
+}
+
+static bool save_file(void) {
+    const char *filename = "file.prg";
+    uint16_t ptr = 0x0801;
+    uint16_t endptr = mem_rd16(&c64.mem_cpu, 0x002d);
+    return save_file_name(filename, ptr, endptr);
+}
+
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
     c64_init(&c64, &(c64_desc_t){
@@ -133,10 +192,14 @@ int main(int argc, char* argv[]) {
     keypad(stdscr, TRUE);
     attron(A_BOLD);
 
+    // set upper case font
     bool isLower = false;
 
     // run the emulation/input/render loop
     while (!quit_requested) {
+        struct timespec frame_start_time;
+        clock_gettime(CLOCK_MONOTONIC_RAW, &frame_start_time);
+
         // tick the emulator for 1 frame
         c64_exec(&c64, FRAME_USEC);
 
@@ -165,6 +228,8 @@ int main(int argc, char* argv[]) {
                 case KEY_F(7): ch = C64_KEY_F7; break;
                 case KEY_F(8): ch = C64_KEY_F8; break;
                 case KEY_END: isLower = !isLower; break;
+                case KEY_NPAGE: ch = (load_file() ? 'l' : 'e'); break;
+                case KEY_PPAGE: ch = (save_file() ? 's' : 'e'); break;
             }
             if (ch > 32) {
                 if (islower(ch)) {
@@ -231,8 +296,17 @@ int main(int argc, char* argv[]) {
         }
         refresh();
 
-        // pause until next frame
-        usleep(FRAME_USEC);
+        struct timespec frame_end_time;
+        clock_gettime(CLOCK_MONOTONIC_RAW, &frame_end_time);
+
+        // calculate consumed usecs
+        long usecs = (frame_end_time.tv_nsec - frame_start_time.tv_nsec) / 1000;
+        if (frame_end_time.tv_sec > frame_start_time.tv_sec)
+            usecs += (frame_end_time.tv_sec - frame_start_time.tv_sec) * 1000000;
+
+        // sleep until next frame
+        long usecs_left = FRAME_USEC - usecs;
+        if (usecs_left > 0) usleep(usecs_left);
     }
     endwin();
     return 0;
