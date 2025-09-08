@@ -40,9 +40,34 @@ static c64_t c64;
 static const char *prg_filename = "file.prg";
 static bool auto_run_file = false;
 static bool file_loaded = false;
+static int char_width = 1;  // 1 = narrow (default), 2 = wide
 
 // Use existing VIC-II and C64 timing constants from headers
 #define PAL_FRAME_USEC ((M6569_VTOTAL * M6569_HTOTAL * 1000000L) / C64_FREQUENCY)
+
+// Clock utility functions
+static inline void clock_get_time(struct timespec *ts) {
+    clock_gettime(CLOCK_MONOTONIC_RAW, ts);
+}
+
+static inline void clock_add_microseconds(struct timespec *ts, long microseconds) {
+    ts->tv_nsec += microseconds * 1000L;
+    if (ts->tv_nsec >= 1000000000L) {
+        ts->tv_sec += ts->tv_nsec / 1000000000L;
+        ts->tv_nsec %= 1000000000L;
+    }
+}
+
+static inline long clock_diff_microseconds(const struct timespec *end, const struct timespec *start) {
+    return (end->tv_sec - start->tv_sec) * 1000000L + 
+           (end->tv_nsec - start->tv_nsec) / 1000L;
+}
+
+static inline bool clock_is_before(const struct timespec *current, const struct timespec *target) {
+    return (current->tv_sec < target->tv_sec) || 
+           (current->tv_sec == target->tv_sec && current->tv_nsec < target->tv_nsec);
+}
+
 
 // VIC-II scanline ranges using official constants
 #define PAL_TOP_BORDER_START (0)
@@ -72,17 +97,25 @@ typedef struct {
 
 static screen_cell_t screen_buffer[SCREEN_HEIGHT][SCREEN_WIDTH];
 static screen_cell_t prev_buffer[SCREEN_HEIGHT][SCREEN_WIDTH];
-static bool screen_dirty = true;  // Force full redraw initially
-// character width - select bad aspect ratio 1 or bad graphics 2
-#define CHAR_WIDTH 1
 
-#if CHAR_WIDTH == 1
-#define CLEAR_POS(x,y) mvaddch((y), (x), ' ');
-#define SET_POS_STR(x,y,s) mvaddstr((y), (x), s);
-#else
-#define CLEAR_POS(x,y) mvaddch((y), (x)*CHAR_WIDTH, ' '); mvaddch((y), (x)*CHAR_WIDTH+1, ' ');
-#define SET_POS_STR(x,y,s) mvaddch((y), (x)*CHAR_WIDTH+1, ' '); mvaddstr((y), (x)*CHAR_WIDTH, s);
-#endif
+// Dynamic character width functions
+static inline void clear_pos(int x, int y) {
+    if (char_width == 1) {
+        mvaddch(y, x, ' ');
+    } else {
+        mvaddch(y, x * 2, ' ');
+        mvaddch(y, x * 2 + 1, ' ');
+    }
+}
+
+static inline void set_pos_str(int x, int y, const char *s) {
+    if (char_width == 1) {
+        mvaddstr(y, x, s);
+    } else {
+        mvaddch(y, x * 2 + 1, ' ');
+        mvaddstr(y, x * 2, s);
+    }
+}
 
 // a signal handler for Ctrl-C, for proper cleanup
 static int quit_requested = 0;
@@ -199,79 +232,94 @@ static void inject_run_command(void) {
     c64_basic_run(&c64);
 }
 
-static bool screen_cells_equal(const screen_cell_t *a, const screen_cell_t *b) {
+static inline bool screen_cells_equal(const screen_cell_t *a, const screen_cell_t *b) {
     return (a->chr == b->chr && 
             a->color_pair == b->color_pair && 
             a->reverse == b->reverse);
 }
 
-static void update_screen_cell(int x, int y, const char *chr, int color_pair, bool reverse) {
-    if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT) {
-        screen_buffer[y][x].chr = chr;
-        screen_buffer[y][x].color_pair = color_pair;
-        screen_buffer[y][x].reverse = reverse;
-    }
+
+// Check if VIC-II is using lowercase character set (hardware-accurate)
+static inline bool is_lowercase_charset(void) {
+    // VIC-II $D018 bits 1-3: 3 = lowercase/uppercase charset, others = uppercase/graphics
+    return ((c64.vic.reg.mem_ptrs & 0x0E) >> 1) == 3;
 }
 
-static void update_screen_line(int text_row, bool isLower) {
-    // Update screen buffer for one character row (8 scanlines)
-    int bg = c64.vic.gunit.bg[0] & 0xF;
-    int border_color_pair = (c64.vic.brd.bc & 0xF) + 1;
+// Toggle character set (simulates SHIFT+CBM)
+static void toggle_charset(void) {
+    uint8_t mem_ptrs = c64.vic.reg.mem_ptrs;
+    if (is_lowercase_charset()) {
+        // Switch to uppercase/graphics
+        mem_ptrs = (mem_ptrs & 0xF1) | 0x04; // bits 1-3 = 010
+    } else {
+        // Switch to lowercase/uppercase
+        mem_ptrs = (mem_ptrs & 0xF1) | 0x06; // bits 1-3 = 011
+    }
+    c64.vic.reg.mem_ptrs = mem_ptrs;
+    _m6569_io_update_memory_unit(&c64.vic.mem, mem_ptrs, c64.vic.reg.ctrl_1);
+}
+
+static void update_screen_line(int text_row) {
+    const int bg = c64.vic.gunit.bg[0] & 0xF;
+    const int border_color_pair = (c64.vic.brd.bc & 0xF) + 1;
+    const int screen_row = text_row + BORDER_VERT;
     
-    // Calculate screen row in our buffer (includes borders)
-    int screen_row = text_row + BORDER_VERT;
+    // Pre-compute all invariants
+    const uint16_t screen_addr = (uint16_t)(c64.vic.reg.mem_ptrs & 0xf0) << 6;
+    const uint16_t base_addr = (screen_addr + text_row * C64_TEXT_COLS) | c64.vic_bank_select;
+    const char * const * const font_map = is_lowercase_charset() ? font_map_lower : font_map_upper;
+    const uint16_t color_addr = (screen_addr + text_row * C64_TEXT_COLS) & 0x03FF;
+    const uint8_t * const color_base = &c64.color_ram[color_addr];
     
-    // Update the full width including borders
-    for (uint32_t xx = 0; xx < SCREEN_WIDTH; xx++) {
-        if ((xx < BORDER_HORI) || (xx >= C64_TEXT_COLS + BORDER_HORI)) {
-            // border area
-            update_screen_cell(xx, screen_row, NULL, border_color_pair, false);
-        }
-        else {
-            // bitmap area (not border)
-            int x = xx - BORDER_HORI;
-            int y = text_row;
-
-            // get color byte (only lower 4 bits wired)
-            int fg = c64.color_ram[y*C64_TEXT_COLS+x] & 0xF;
-            int color_pair = (fg*16+bg)+1;
-
-            // get character index
-            uint16_t screen_addr = (uint16_t)(c64.vic.reg.mem_ptrs & 0xf0) << 6;
-            uint16_t addr = screen_addr + y*C64_TEXT_COLS + x;
-            uint8_t font_code = mem_rd(&c64.mem_vic, addr);
-            const char *chr = (isLower ? font_map_lower : font_map_upper)[font_code & 127];
-
-            // check if character should be inverted
-            bool reverse = (font_code > 127);
-            
-            // update screen buffer
-            update_screen_cell(xx, screen_row, chr, color_pair, reverse);
-        }
+    screen_cell_t * const row = &screen_buffer[screen_row][0];
+    
+    // Left border - direct array access
+    for (uint32_t x = 0; x < BORDER_HORI; x++) {
+        row[x] = (screen_cell_t){NULL, border_color_pair, false};
+    }
+    
+    // Character area - optimized loop with direct memory access
+    for (uint32_t x = 0; x < C64_TEXT_COLS; x++) {
+        const uint32_t screen_x = x + BORDER_HORI;
+        const int fg = color_base[x] & 0xF;
+        const uint8_t font_code = mem_rd(&c64.mem_vic, base_addr + x);
+        
+        row[screen_x] = (screen_cell_t){
+            .chr = font_map[font_code & 127],
+            .color_pair = (fg << 4) + bg + 1,
+            .reverse = (font_code > 127)
+        };
+    }
+    
+    // Right border - direct array access
+    const screen_cell_t border_cell = {NULL, border_color_pair, false};
+    for (uint32_t x = C64_TEXT_COLS + BORDER_HORI; x < SCREEN_WIDTH; x++) {
+        row[x] = border_cell;
     }
 }
 
 static void update_border_lines(int start_screen_row, int end_screen_row) {
-    // Update screen buffer for border lines
-    int color_pair = (c64.vic.brd.bc & 0xF) + 1;
+    const int color_pair = (c64.vic.brd.bc & 0xF) + 1;
+    const screen_cell_t border_cell = {NULL, color_pair, false};
     
     for (int screen_row = start_screen_row; screen_row <= end_screen_row; screen_row++) {
-        if (screen_row >= 0 && screen_row < SCREEN_HEIGHT) {
-            for (uint32_t xx = 0; xx < SCREEN_WIDTH; xx++) {
-                update_screen_cell(xx, screen_row, NULL, color_pair, false);
-            }
+        screen_cell_t * const row = &screen_buffer[screen_row][0];
+        for (uint32_t x = 0; x < SCREEN_WIDTH; x++) {
+            row[x] = border_cell;
         }
     }
 }
 
 static void flush_screen_changes(void) {
     for (int y = 0; y < SCREEN_HEIGHT; y++) {
+        const screen_cell_t * const current_row = &screen_buffer[y][0];
+        screen_cell_t * const prev_row = &prev_buffer[y][0];
+        
         for (int x = 0; x < SCREEN_WIDTH; x++) {
-            screen_cell_t *current = &screen_buffer[y][x];
-            screen_cell_t *previous = &prev_buffer[y][x];
+            const screen_cell_t * const current = &current_row[x];
+            screen_cell_t * const previous = &prev_row[x];
             
-            // Only update if cell has changed or force redraw
-            if (screen_dirty || !screen_cells_equal(current, previous)) {
+            if (!screen_cells_equal(current, previous)) {
                 // Set color
                 if (current->color_pair != -1) {
                     attron(COLOR_PAIR(current->color_pair));
@@ -284,9 +332,9 @@ static void flush_screen_changes(void) {
                 
                 // Draw character
                 if (current->chr) {
-                    SET_POS_STR(x, y, current->chr);
+                    set_pos_str(x, y, current->chr);
                 } else {
-                    CLEAR_POS(x, y);
+                    clear_pos(x, y);
                 }
                 
                 // Restore attributes
@@ -299,8 +347,6 @@ static void flush_screen_changes(void) {
             }
         }
     }
-    
-    screen_dirty = false;
 }
 
 static void execute_scanlines(int start_line, int end_line) {
@@ -316,7 +362,7 @@ static void execute_scanlines(int start_line, int end_line) {
     c64_exec(&c64, microseconds);
 }
 
-static void execute_frame_by_scanlines(bool isLower) {
+static void execute_frame_by_scanlines(void) {
     // 1. Execute top border/vblank area in chunks and update border colors
     for (int line = PAL_TOP_BORDER_START; line <= PAL_TOP_BORDER_END; line += BORDER_CHUNK_SIZE) {
         int end_line = (line + BORDER_CHUNK_SIZE - 1);
@@ -344,7 +390,7 @@ static void execute_frame_by_scanlines(bool isLower) {
         
         // Immediately update screen buffer for this text row
         if (text_row < C64_TEXT_ROWS) {
-            update_screen_line(text_row, isLower);
+            update_screen_line(text_row);
         }
         text_row++;
     }
@@ -419,6 +465,8 @@ static void print_usage(const char *program_name) {
     printf("\n");
     printf("Options:\n");
     printf("  -h, --help    Show this help message\n");
+    printf("  --narrow      Use narrow characters (default, worse aspect ratio 1:1)\n");
+    printf("  --wide        Use wide characters (aspect ratio 2:1, worse graphics)\n");
     printf("\n");
     printf("Arguments:\n");
     printf("  filename      PRG file to auto-load and run (default: file.prg for manual loading)\n");
@@ -436,6 +484,12 @@ static void parse_arguments(int argc, char* argv[]) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             exit(0);
+        }
+        else if (strcmp(argv[i], "--narrow") == 0) {
+            char_width = 1;
+        }
+        else if (strcmp(argv[i], "--wide") == 0) {
+            char_width = 2;
         }
         else if (argv[i][0] == '-') {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
@@ -480,20 +534,22 @@ int main(int argc, char* argv[]) {
     keypad(stdscr, TRUE);
     attron(A_BOLD);
 
-    // set upper case font
-    bool isLower = false;
+    // Initialize screen buffers - previous buffer gets invalid values so first frame draws
+    memset(prev_buffer, 0xFF, sizeof(prev_buffer));
+
+    // Character set controlled by VIC-II $D018 register (hardware-accurate)
 
     // Initialize timing for 50.125 Hz frame rate
     struct timespec next_frame_time;
-    clock_gettime(CLOCK_MONOTONIC_RAW, &next_frame_time);
+    clock_get_time(&next_frame_time);
     
     // run the emulation/input/render loop at exactly 50.125 Hz
     while (!quit_requested) {
         struct timespec frame_start_time;
-        clock_gettime(CLOCK_MONOTONIC_RAW, &frame_start_time);
+        clock_get_time(&frame_start_time);
 
         // Execute one complete frame by scanlines with per-line buffer updates
-        execute_frame_by_scanlines(isLower);
+        execute_frame_by_scanlines();
         
         // Auto-load and optionally run file when BASIC is ready
         if (auto_run_file && !file_loaded) {
@@ -511,7 +567,7 @@ int main(int argc, char* argv[]) {
             switch (ch) {
                 case 10:  ch = C64_KEY_RETURN; break; // ENTER
                 case KEY_BACKSPACE: ch = C64_KEY_DEL; break;
-                case 27:  ch = C64_KEY_STOP; break; // ESCAPE
+                case 27:  ch = C64_KEY_STOP; break; // ESC
                 case KEY_LEFT: ch = C64_KEY_CSRLEFT; break;
                 case KEY_RIGHT: ch = C64_KEY_CSRRIGHT; break;
                 case KEY_UP: ch = C64_KEY_CSRUP; break;
@@ -529,19 +585,24 @@ int main(int argc, char* argv[]) {
                 case KEY_F(6): ch = C64_KEY_F6; break;
                 case KEY_F(7): ch = C64_KEY_F7; break;
                 case KEY_F(8): ch = C64_KEY_F8; break;
-                case KEY_END: isLower = !isLower; break;
-                case KEY_NPAGE: ch = (load_file() ? 'l' : 'e'); break;
-                case KEY_PPAGE: ch = (save_file() ? 's' : 'e'); break;
+                case KEY_END:
+                    toggle_charset();
+                    ch = -1; // Don't send to C64
+                    break;
+                case KEY_NPAGE: 
+                    ch = load_file() ? 'l' : 'e'; 
+                    break;
+                case KEY_PPAGE: 
+                    ch = save_file() ? 's' : 'e'; 
+                    break;
+                default:
+                    // Handle case conversion for printable characters
+                    if (ch > 32 && ch < 127) {
+                        ch = islower(ch) ? toupper(ch) : (isupper(ch) ? tolower(ch) : ch);
+                    }
+                    break;
             }
-            if (ch > 32) {
-                if (islower(ch)) {
-                    ch = toupper(ch);
-                }
-                else if (isupper(ch)) {
-                    ch = tolower(ch);
-                }
-            }
-            if (ch < 256) {
+            if (ch > 0 && ch < 256) {
                 c64_key_down(&c64, ch);
                 c64_key_up(&c64, ch);
             }
@@ -551,24 +612,15 @@ int main(int argc, char* argv[]) {
         flush_screen_changes();
         refresh();
 
-        // Calculate next frame time for 50.125 Hz (19968 microseconds per frame)
-        next_frame_time.tv_nsec += PAL_FRAME_USEC * 1000;
-        if (next_frame_time.tv_nsec >= 1000000000) {
-            next_frame_time.tv_sec += 1;
-            next_frame_time.tv_nsec -= 1000000000;
-        }
+        // Calculate next frame time for 50.125 Hz
+        clock_add_microseconds(&next_frame_time, PAL_FRAME_USEC);
 
         // Sleep until next frame to maintain real-time 50.125 Hz
         struct timespec current_time;
-        clock_gettime(CLOCK_MONOTONIC_RAW, &current_time);
+        clock_get_time(&current_time);
         
-        if (current_time.tv_sec < next_frame_time.tv_sec || 
-            (current_time.tv_sec == next_frame_time.tv_sec && current_time.tv_nsec < next_frame_time.tv_nsec)) {
-            
-            // Calculate sleep time in microseconds
-            long sleep_usec = (next_frame_time.tv_sec - current_time.tv_sec) * 1000000;
-            sleep_usec += (next_frame_time.tv_nsec - current_time.tv_nsec) / 1000;
-            
+        if (clock_is_before(&current_time, &next_frame_time)) {
+            long sleep_usec = clock_diff_microseconds(&next_frame_time, &current_time);
             if (sleep_usec > 0) {
                 usleep(sleep_usec);
             }
