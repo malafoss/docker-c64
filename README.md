@@ -1,50 +1,18 @@
 # docker-c64
-A C64 emulator in Docker. This is a real C64 emulator "underneath", but with a
-stripped down display output (just the character buffer converted to PETSCII graphics),
+A C64 emulator that runs on a terminal window. This is a real C64 emulator "underneath", but with a
+stripped down display output (just the character buffer converted to ASCII),
 and no sound output. Based on https://github.com/floooh/docker-c64 but modified to have:
- - Accurate PETSCII graphics with UTF-8 character mapping
- - Scanline-accurate VIC-II timing and rendering
- - Automatic file loading and execution
- - Real-time per-line screen updates
+ - More accurate PETSCII graphics with UTF-8 character mapping
+ - Scanline-accurate VIC-II timing and text line rendering
+ - Autoloading and running a PRG file
  - Container image built from scratch
+ - Best used with a terminal supporting xterm-256color
 
-## Usage
-
-### Command Line Options
-```
-./c64 [OPTIONS] [filename]
-
-Options:
-  -h, --help    Show help message
-
-Arguments:
-  filename      PRG file to auto-load and run (default: file.prg for manual loading)
-```
-
-### Examples
-```bash
-# Run with default file.prg (manual loading with PageDown)
-./c64
-
-# Auto-load and run a specific file
-./c64 demo.prg
-
-# Show help
-./c64 --help
-```
-
-### Controls
-- **PageDown**: Load file
-- **PageUp**: Save file  
-- **End**: Toggle upper/lower case characters
-- **Escape**: RUN/STOP key
-- **Ctrl+C**: Exit emulator
-
-## Docker Usage
+## Howto
 
 Build using docker or podman:
 ```
-> podman build . -t c64
+> podman build . -t malafoss/c64
 ```
 
 Run from Docker Hub:
@@ -52,15 +20,19 @@ Run from Docker Hub:
 > podman run --rm -it malafoss/c64
 ```
 
-Auto-load and run a local PRG file:
+Load and run a demo.prg file:
 ```
 > podman run --rm -it -v ./demo.prg:/demo.prg malafoss/c64 demo.prg
 ```
 
-Run with default file.prg (manual loading):
-```
-> podman run --rm -it -v ./myprogram.prg:/file.prg malafoss/c64
-```
+### Controls
+- **PageDown**: Load file (given filename or file.prg by default)
+- **PageUp**: Save file (given filename or file.prg by default)
+- **End**: Toggle upper/lower case characters
+- **Escape**: RUN/STOP key
+- **Ctrl+C**: Exit emulator
+
+## Other
 
 The source code is based on these repositories:
 
@@ -69,3 +41,7 @@ https://github.com/floooh/docker-c64
 https://github.com/floooh/chips
 
 https://github.com/floooh/chips-test
+
+The ready built container image:
+
+https://hub.docker.com/r/malafoss/c64
