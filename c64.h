@@ -442,10 +442,10 @@ uint16_t c64_syscall_return_addr(void);
     #define CHIPS_ASSERT(c) assert(c)
 #endif
 
-#define _C64_SCREEN_WIDTH (392)
-#define _C64_SCREEN_HEIGHT (272)
-#define _C64_SCREEN_X (64)
-#define _C64_SCREEN_Y (24)
+#define _C64_SCREEN_WIDTH  (384)   /* TV crop: 32px left border + 320px active + 32px right border  */
+#define _C64_SCREEN_HEIGHT (270)   /* TV crop: 35 lines top border + 200 active + 35 bottom         */
+#define _C64_SCREEN_X      (64)    /* crt.x = h_count-4; vis_x0=8; border left at h_count=16/crt.x=12 */
+#define _C64_SCREEN_Y      (25)    /* crt.y = v_count+9; vis_y0=25 → first visible v_count=16     */
 
 static uint8_t _c64_cpu_port_in(void* user_data);
 static void _c64_cpu_port_out(uint8_t data, void* user_data);

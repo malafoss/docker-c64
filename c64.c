@@ -35,12 +35,16 @@
 #include "c1541.h"
 #include "c64.h"
 #include "c64-roms.h"
+#include "sixel.h"
 
 static c64_t c64;
 static const char *prg_filename = "file.prg";
 static bool auto_run_file = false;
 static bool file_loaded = false;
 static int char_width = 1;  // 1 = narrow (default), 2 = wide
+
+static gfx_mode_t  gfx_mode  = GFXMODE_AUTO;
+static gfx_state_t gfx_state;
 
 // Use existing VIC-II and C64 timing constants from headers
 #define PAL_FRAME_USEC ((M6569_VTOTAL * M6569_HTOTAL * 1000000L) / C64_FREQUENCY)
@@ -146,32 +150,74 @@ static const char *font_map_lower[] = {
     "┏", "┻", "┳", "┫", "▏", "▍", "🮈", "🮃", "▀", "▃", "🭿", "▖", "▝", "┛", "▘", "▚", // 112
 };
 
-// map C64 color numbers to xterm-256color colors
-static const int colors[16] = {
-    16,     // black
-    231,    // white
-    88,     // red
-    73,     // cyan
-    54,     // purple
-    71,     // green
-    18,     // blue
-    185,    // yellow
-    136,    // orange
-    58,     // brown
-    131,    // light-red
-    59,     // dark-grey
-    102,    // grey
-    150,    // light green
-    62,     // light blue
-    145,    // light grey
+// C64 color palette as exact RGB values (based on Pepto's palette)
+static const struct {
+    uint8_t r, g, b;
+} c64_colors[16] = {
+    {0x00, 0x00, 0x00},  // 0: black
+    {0xFF, 0xFF, 0xFF},  // 1: white
+    {0x68, 0x37, 0x2B},  // 2: red
+    {0x70, 0xA4, 0xB2},  // 3: cyan
+    {0x6F, 0x3D, 0x86},  // 4: purple
+    {0x58, 0x8D, 0x43},  // 5: green
+    {0x35, 0x28, 0x79},  // 6: blue
+    {0xB8, 0xC7, 0x6F},  // 7: yellow
+    {0x6F, 0x4F, 0x25},  // 8: orange
+    {0x43, 0x39, 0x00},  // 9: brown
+    {0x9A, 0x67, 0x59},  // 10: light red
+    {0x44, 0x44, 0x44},  // 11: dark grey
+    {0x6C, 0x6C, 0x6C},  // 12: grey
+    {0x9A, 0xD2, 0x84},  // 13: light green
+    {0x6C, 0x5E, 0xB5},  // 14: light blue
+    {0x95, 0x95, 0x95},  // 15: light grey
 };
 
 static void init_c64_colors(void) {
     start_color();
-    for (int fg = 0; fg < 16; fg++) {
-        for (int bg = 0; bg < 16; bg++) {
-            int cp = (fg*16 + bg) + 1;
-            init_pair(cp, colors[fg], colors[bg]);
+
+    // Check if terminal supports color changes
+    if (can_change_color()) {
+        // Define exact C64 colors using RGB values (0-1000 scale for ncurses)
+        for (int i = 0; i < 16; i++) {
+            init_color(i + 16, // Use colors 16-31 to avoid conflicts
+                      (c64_colors[i].r * 1000) / 255,
+                      (c64_colors[i].g * 1000) / 255,
+                      (c64_colors[i].b * 1000) / 255);
+        }
+
+        // Create color pairs using our custom colors
+        for (int fg = 0; fg < 16; fg++) {
+            for (int bg = 0; bg < 16; bg++) {
+                int cp = (fg*16 + bg) + 1;
+                init_pair(cp, fg + 16, bg + 16);
+            }
+        }
+    } else {
+        // Fallback to xterm-256color mapping
+        static const int color_fallback[16] = {
+            16,     // black
+            231,    // white
+            88,     // red
+            73,     // cyan
+            54,     // purple
+            71,     // green
+            18,     // blue
+            185,    // yellow
+            136,    // orange
+            58,     // brown
+            131,    // light-red
+            59,     // dark-grey
+            102,    // grey
+            150,    // light green
+            62,     // light blue
+            145,    // light grey
+        };
+
+        for (int fg = 0; fg < 16; fg++) {
+            for (int bg = 0; bg < 16; bg++) {
+                int cp = (fg*16 + bg) + 1;
+                init_pair(cp, color_fallback[fg], color_fallback[bg]);
+            }
         }
     }
 }
@@ -464,9 +510,13 @@ static void print_usage(const char *program_name) {
     printf("A C64 emulator running in terminal with PETSCII graphics.\n");
     printf("\n");
     printf("Options:\n");
-    printf("  -h, --help    Show this help message\n");
-    printf("  --narrow      Use narrow characters (default, worse aspect ratio 1:1)\n");
-    printf("  --wide        Use wide characters (aspect ratio 2:1, worse graphics)\n");
+    printf("  -h, --help         Show this help message\n");
+    printf("  --mode=MODE        Output mode (default: auto)\n");
+    printf("                       auto   detect kitty or sixel, fall back to text\n");
+    printf("                       kitty  kitty graphics protocol\n");
+    printf("                       sixel  sixel graphics protocol\n");
+    printf("                       narrow text mode, narrow characters (1:1 aspect)\n");
+    printf("                       wide   text mode, wide characters (2:1 aspect)\n");
     printf("\n");
     printf("Arguments:\n");
     printf("  filename      PRG file to auto-load and run (default: file.prg for manual loading)\n");
@@ -485,11 +535,8 @@ static void parse_arguments(int argc, char* argv[]) {
             print_usage(argv[0]);
             exit(0);
         }
-        else if (strcmp(argv[i], "--narrow") == 0) {
-            char_width = 1;
-        }
-        else if (strcmp(argv[i], "--wide") == 0) {
-            char_width = 2;
+        else if (gfx_parse_arg(argv[i], &gfx_mode, &char_width)) {
+            // handled
         }
         else if (argv[i][0] == '-') {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
@@ -505,6 +552,10 @@ static void parse_arguments(int argc, char* argv[]) {
 }
 
 int main(int argc, char* argv[]) {
+    // Save original terminal state before anything touches it
+    struct termios orig_tio;
+    bool have_orig_tio = (tcgetattr(STDIN_FILENO, &orig_tio) == 0);
+
     parse_arguments(argc, argv);
     c64_init(&c64, &(c64_desc_t){
         .roms = {
@@ -517,32 +568,45 @@ int main(int argc, char* argv[]) {
     // install a Ctrl-C signal handler
     signal(SIGINT, catch_sigint);
 
-    // UTF-8
-    setlocale(LC_ALL, "C.utf8");
+    // Resolve auto-detection (gfx_detect handles raw mode internally)
+    if (gfx_mode == GFXMODE_AUTO) {
+        gfx_mode = gfx_detect();
+        fprintf(stderr, "Graphics mode: %s\n", gfx_mode_name(gfx_mode));
+    }
 
-    // setup curses
-    initscr();
-    init_c64_colors();
-    
-    // Set terminal background to true black for xterm-256color
-    assume_default_colors(231, 16);  // white on true black
-    
-    noecho();
-    curs_set(FALSE);
-    cbreak();
-    nodelay(stdscr, TRUE);
-    keypad(stdscr, TRUE);
-    attron(A_BOLD);
+    if (gfx_mode != GFXMODE_NONE) {
+        // Graphics mode: put terminal in raw non-blocking mode
+        if (have_orig_tio) {
+            struct termios tio = orig_tio;
+            tio.c_lflag    &= ~(ICANON | ECHO);
+            tio.c_cc[VMIN]  = 0;
+            tio.c_cc[VTIME] = 0;
+            tcsetattr(STDIN_FILENO, TCSANOW, &tio);
+        }
+        // Hide cursor and clear screen
+        write(STDOUT_FILENO, "\033[?25l\033[2J\033[H", 13);
+        gfx_init(&gfx_state, gfx_mode);
+    } else {
+        // Text mode: existing ncurses setup
+        setlocale(LC_ALL, "C.utf8");
+        initscr();
+        init_c64_colors();
+        assume_default_colors(231, 16);  // white on true black
+        noecho();
+        curs_set(FALSE);
+        cbreak();
+        nodelay(stdscr, TRUE);
+        keypad(stdscr, TRUE);
+        attron(A_BOLD);
+    }
 
     // Initialize screen buffers - previous buffer gets invalid values so first frame draws
     memset(prev_buffer, 0xFF, sizeof(prev_buffer));
 
-    // Character set controlled by VIC-II $D018 register (hardware-accurate)
-
     // Initialize timing for 50.125 Hz frame rate
     struct timespec next_frame_time;
     clock_get_time(&next_frame_time);
-    
+
     // run the emulation/input/render loop at exactly 50.125 Hz
     while (!quit_requested) {
         struct timespec frame_start_time;
@@ -550,7 +614,7 @@ int main(int argc, char* argv[]) {
 
         // Execute one complete frame by scanlines with per-line buffer updates
         execute_frame_by_scanlines();
-        
+
         // Auto-load and optionally run file when BASIC is ready
         if (auto_run_file && !file_loaded) {
             if (is_c64_basic_ready()) {
@@ -561,13 +625,22 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // keyboard input
-        int ch = getch();
+        // Keyboard input
+        int ch = ERR;
+        if (gfx_mode != GFXMODE_NONE) {
+            // Raw mode: read one byte non-blocking
+            uint8_t c;
+            if (read(STDIN_FILENO, &c, 1) == 1) ch = (int)c;
+        } else {
+            ch = getch();
+        }
+
         if (ch != ERR) {
             switch (ch) {
                 case 10:  ch = C64_KEY_RETURN; break; // ENTER
+                case 127: ch = C64_KEY_DEL; break;    // DEL (raw mode backspace)
                 case KEY_BACKSPACE: ch = C64_KEY_DEL; break;
-                case 27:  ch = C64_KEY_STOP; break; // ESC
+                case 27:  ch = C64_KEY_STOP; break; // ESC / RUN-STOP
                 case KEY_LEFT: ch = C64_KEY_CSRLEFT; break;
                 case KEY_RIGHT: ch = C64_KEY_CSRRIGHT; break;
                 case KEY_UP: ch = C64_KEY_CSRUP; break;
@@ -589,11 +662,11 @@ int main(int argc, char* argv[]) {
                     toggle_charset();
                     ch = -1; // Don't send to C64
                     break;
-                case KEY_NPAGE: 
-                    ch = load_file() ? 'l' : 'e'; 
+                case KEY_NPAGE:
+                    ch = load_file() ? 'l' : 'e';
                     break;
-                case KEY_PPAGE: 
-                    ch = save_file() ? 's' : 'e'; 
+                case KEY_PPAGE:
+                    ch = save_file() ? 's' : 'e';
                     break;
                 default:
                     // Handle case conversion for printable characters
@@ -607,10 +680,14 @@ int main(int argc, char* argv[]) {
                 c64_key_up(&c64, ch);
             }
         }
-        
-        // Flush all screen changes once per frame for optimal performance
-        flush_screen_changes();
-        refresh();
+
+        // Render
+        if (gfx_mode != GFXMODE_NONE) {
+            gfx_present(&gfx_state, c64.fb);
+        } else {
+            flush_screen_changes();
+            refresh();
+        }
 
         // Calculate next frame time for 50.125 Hz
         clock_add_microseconds(&next_frame_time, PAL_FRAME_USEC);
@@ -618,7 +695,6 @@ int main(int argc, char* argv[]) {
         // Sleep until next frame to maintain real-time 50.125 Hz
         struct timespec current_time;
         clock_get_time(&current_time);
-        
         if (clock_is_before(&current_time, &next_frame_time)) {
             long sleep_usec = clock_diff_microseconds(&next_frame_time, &current_time);
             if (sleep_usec > 0) {
@@ -626,6 +702,14 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    endwin();
+
+    // Cleanup
+    if (gfx_mode != GFXMODE_NONE) {
+        write(STDOUT_FILENO, "\033[?25h", 6);  // restore cursor
+        if (have_orig_tio)
+            tcsetattr(STDIN_FILENO, TCSANOW, &orig_tio);
+    } else {
+        endwin();
+    }
     return 0;
 }

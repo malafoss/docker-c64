@@ -1,47 +1,88 @@
 # docker-c64
-A C64 emulator that runs on a terminal window. This is a real C64 emulator "underneath", but with a
-stripped down display output (just the character buffer converted to ASCII),
-and no sound output. Based on https://github.com/floooh/docker-c64 but modified to have:
- - More accurate PETSCII graphics with UTF-8 character mapping
- - Scanline-accurate VIC-II timing and text line rendering
- - Autoloading and running a PRG file
- - Container image built from scratch
- - Best used with a terminal supporting xterm-256color
 
-## Howto
+A C64 emulator that runs in a terminal window. This is a real C64 emulator underneath, with
+pixel-accurate graphics output via the sixel or kitty terminal graphics protocols, or a
+Unicode PETSCII text mode fallback. No sound output. Based on
+https://github.com/floooh/docker-c64 but modified to have:
 
-Build using docker or podman:
+- Pixel graphics output via sixel or kitty protocols (auto-detected)
+- Full PAL TV crop with accurate border rendering
+- More accurate PETSCII text mode with UTF-8 character mapping
+- Scanline-accurate VIC-II timing
+- Autoloading and running a PRG file
+- Container image built from scratch
+
+## Quick start
+
+The easiest way to run is via the included `c64.sh` wrapper script, which handles mounting
+PRG files and passes arguments through to the container:
+
 ```
-> podman build . -t malafoss/c64
+./c64.sh
+./c64.sh demo.prg
+./c64.sh --mode=sixel demo.prg
+```
+
+`c64.sh` uses `podman` if available, otherwise `docker`.
+
+## Manual usage
+
+Build:
+```
+podman build . -t malafoss/c64
 ```
 
 Run from Docker Hub:
 ```
-> podman run --rm -it malafoss/c64
+podman run --rm -it malafoss/c64
 ```
 
-Load and run a demo.prg file:
+Load and run a PRG file:
 ```
-> podman run --rm -it -v ./demo.prg:/demo.prg malafoss/c64 demo.prg
+podman run --rm -it -v ./demo.prg:/demo.prg malafoss/c64 /demo.prg
 ```
 
-### Controls
-- **PageDown**: Load file (given filename or file.prg by default)
-- **PageUp**: Save file (given filename or file.prg by default)
-- **End**: Toggle upper/lower case characters
-- **Escape**: RUN/STOP key
-- **Ctrl+C**: Exit emulator
+## Output modes
 
-## Other
+The `--mode=` option selects the graphics output. The default is `auto`, which probes
+the terminal at startup and picks the best available mode.
 
-The source code is based on these repositories:
+| Mode     | Description                                         |
+|----------|-----------------------------------------------------|
+| `auto`   | Auto-detect kitty or sixel, fall back to text (default) |
+| `kitty`  | Kitty terminal graphics protocol                    |
+| `sixel`  | Sixel graphics protocol (xterm, mlterm, foot, …)   |
+| `narrow` | Unicode PETSCII text, narrow characters (1:1 ratio) |
+| `wide`   | Unicode PETSCII text, wide characters (2:1 ratio)   |
 
-https://github.com/floooh/docker-c64
+Examples:
+```
+podman run --rm -it malafoss/c64 --mode=kitty
+podman run --rm -it malafoss/c64 --mode=sixel
+podman run --rm -it malafoss/c64 --mode=narrow
+```
 
-https://github.com/floooh/chips
+Or via the wrapper:
+```
+./c64.sh --mode=kitty demo.prg
+```
 
-https://github.com/floooh/chips-test
+## Controls
 
-The ready built container image:
+| Key          | Action                                      |
+|--------------|---------------------------------------------|
+| PageDown     | Load file (given filename or `file.prg`)    |
+| PageUp       | Save file (given filename or `file.prg`)    |
+| End          | Toggle upper/lower case characters          |
+| Escape       | RUN/STOP key                                |
+| Ctrl+C       | Exit emulator                               |
 
-https://hub.docker.com/r/malafoss/c64
+## Source
+
+Based on:
+
+- https://github.com/floooh/docker-c64
+- https://github.com/floooh/chips
+- https://github.com/floooh/chips-test
+
+Pre-built container image: https://hub.docker.com/r/malafoss/c64
