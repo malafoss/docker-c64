@@ -20,6 +20,8 @@ PRG files and passes arguments through to the container:
 ```
 ./c64.sh
 ./c64.sh demo.prg
+./c64.sh game.tap
+./c64.sh game.d64
 ./c64.sh --mode=sixel demo.prg
 ```
 
@@ -37,9 +39,11 @@ Run from Docker Hub:
 podman run --rm -it malafoss/c64
 ```
 
-Load and run a PRG file:
+Load and run a file — supports `.prg`, `.tap` (datasette), and `.d64` (disk image):
 ```
 podman run --rm -it -v ./demo.prg:/demo.prg malafoss/c64 /demo.prg
+podman run --rm -it -v ./game.tap:/game.tap malafoss/c64 /game.tap
+podman run --rm -it -v ./game.d64:/game.d64 malafoss/c64 /game.d64
 ```
 
 ## Output modes
