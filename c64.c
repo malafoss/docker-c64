@@ -40,6 +40,8 @@
 static c64_t c64;
 static const char *prg_filename = "file.prg";
 static bool auto_run_file = false;
+static bool auto_tape_file = false;
+static bool auto_disk_file = false;
 static bool file_loaded = false;
 static int char_width = 1;  // 1 = narrow (default), 2 = wide
 
@@ -242,6 +244,85 @@ static bool load_file_name(const char *filename) {
     munmap(ptr, size);
     close(fd);
     return rc;
+}
+
+/*
+    D64 fast-loader: parse a .d64 disk image, extract the first PRG file,
+    and inject it directly via c64_quickload().
+
+    D64 format: 35 tracks, variable sectors per track, 256 bytes per sector.
+    Track 18 sector 0 = BAM, sector 1 = first directory sector.
+    Each directory sector holds 8 entries of 32 bytes each.
+    Entry byte 2 = file type (0x82 = closed PRG), bytes 3-4 = first track/sector.
+    Sector link: byte 0 = next track (0 = last sector), byte 1 = next sector
+    (or, when track=0, last byte offset used: data runs offsets 2..byte1 inclusive).
+*/
+static const int _d64_spt[35] = {
+    21,21,21,21,21,21,21,21,21,21,21,21,21,21,21,21,21, /* tracks 1-17 */
+    19,19,19,19,19,19,19,                                /* tracks 18-24 */
+    18,18,18,18,18,18,                                   /* tracks 25-30 */
+    17,17,17,17,17                                       /* tracks 31-35 */
+};
+
+static const uint8_t *_d64_sector(const uint8_t *d64, int track, int sector) {
+    int off = 0;
+    for (int t = 1; t < track; t++) off += _d64_spt[t - 1];
+    return d64 + (off + sector) * 256;
+}
+
+static bool load_d64_file(const char *filename) {
+    int fd = open(filename, O_RDONLY);
+    if (fd == -1) return false;
+    struct stat sb;
+    if (fstat(fd, &sb) == -1) { close(fd); return false; }
+    void *ptr = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (ptr == MAP_FAILED) return false;
+
+    const uint8_t *d64 = (const uint8_t *)ptr;
+    bool ok = false;
+
+    if (sb.st_size < 174848) goto done;
+
+    /* scan directory for first PRG entry */
+    int dt = 18, ds = 1;
+    int first_t = 0, first_s = 0;
+    while (dt && !first_t) {
+        const uint8_t *dir = _d64_sector(d64, dt, ds);
+        for (int e = 0; e < 8 && !first_t; e++) {
+            const uint8_t *ent = dir + e * 32;
+            if ((ent[2] & 0x07) == 0x02) { /* PRG */
+                first_t = ent[3];
+                first_s = ent[4];
+            }
+        }
+        dt = dir[0];
+        ds = dir[1];
+    }
+    if (!first_t) goto done;
+
+    /* follow sector chain into buffer */
+    static uint8_t prg[65536];
+    int len = 0;
+    int t = first_t, s = first_s;
+    while (t && len < (int)sizeof(prg)) {
+        const uint8_t *sec = _d64_sector(d64, t, s);
+        int nt = sec[0], ns = sec[1];
+        /* when nt==0: data runs from offset 2 to ns inclusive */
+        int nb = nt ? 254 : (ns - 1);
+        if (nb < 0) nb = 0;
+        if (len + nb > (int)sizeof(prg)) nb = (int)sizeof(prg) - len;
+        memcpy(prg + len, sec + 2, nb);
+        len += nb;
+        t = nt; s = ns;
+    }
+
+    if (len >= 2)
+        ok = c64_quickload(&c64, (chips_range_t){ .ptr = prg, .size = len });
+
+done:
+    munmap(ptr, sb.st_size);
+    return ok;
 }
 
 static bool load_file(void) {
@@ -519,7 +600,11 @@ static void print_usage(const char *program_name) {
     printf("                       wide   text mode, wide characters (2:1 aspect)\n");
     printf("\n");
     printf("Arguments:\n");
-    printf("  filename      PRG file to auto-load and run (default: file.prg for manual loading)\n");
+    printf("  filename      File to auto-load and run:\n");
+    printf("                  .prg  inject directly into memory\n");
+    printf("                  .tap  load via datasette (slow, real-time)\n");
+    printf("                  .d64  load first PRG from disk image\n");
+    printf("                (default: file.prg for manual loading)\n");
     printf("\n");
     printf("Controls:\n");
     printf("  PageDown      Load file\n");
@@ -544,9 +629,14 @@ static void parse_arguments(int argc, char* argv[]) {
             exit(1);
         }
         else {
-            // First non-option argument is the filename - auto-run it
             prg_filename = argv[i];
-            auto_run_file = true;
+            const char *dot = strrchr(argv[i], '.');
+            if (dot && (strcmp(dot, ".tap") == 0 || strcmp(dot, ".TAP") == 0))
+                auto_tape_file = true;
+            else if (dot && (strcmp(dot, ".d64") == 0 || strcmp(dot, ".D64") == 0))
+                auto_disk_file = true;
+            else
+                auto_run_file = true;
         }
     }
 }
@@ -558,6 +648,7 @@ int main(int argc, char* argv[]) {
 
     parse_arguments(argc, argv);
     c64_init(&c64, &(c64_desc_t){
+        .c1530_enabled = true,
         .roms = {
             .chars = { .ptr=dump_c64_char_bin, .size=sizeof(dump_c64_char_bin) },
             .basic = { .ptr=dump_c64_basic_bin, .size=sizeof(dump_c64_basic_bin) },
@@ -621,6 +712,33 @@ int main(int argc, char* argv[]) {
                 if (load_file_name(prg_filename)) {
                     inject_run_command();
                 }
+                file_loaded = true;
+            }
+        }
+        if (auto_tape_file && !file_loaded) {
+            if (is_c64_basic_ready()) {
+                int fd = open(prg_filename, O_RDONLY);
+                if (fd != -1) {
+                    struct stat sb;
+                    if (fstat(fd, &sb) == 0) {
+                        void *ptr = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+                        if (ptr != MAP_FAILED) {
+                            if (c64_insert_tape(&c64, (chips_range_t){ .ptr=ptr, .size=sb.st_size })) {
+                                c64_tape_play(&c64);
+                                c64_basic_load(&c64);  /* injects LOAD + ENTER */
+                            }
+                            munmap(ptr, sb.st_size);
+                        }
+                    }
+                    close(fd);
+                }
+                file_loaded = true;
+            }
+        }
+        if (auto_disk_file && !file_loaded) {
+            if (is_c64_basic_ready()) {
+                if (load_d64_file(prg_filename))
+                    inject_run_command();
                 file_loaded = true;
             }
         }
