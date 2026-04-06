@@ -1,4 +1,4 @@
-# docker-c64
+# c64
 
 A C64 emulator that runs in a terminal window. This is a real C64 emulator underneath, with
 pixel-accurate graphics output via the sixel or kitty terminal graphics protocols, or a
@@ -78,6 +78,8 @@ Or via the wrapper:
 | Ctrl+C       | Exit emulator                               |
 
 ## Source
+
+See https://github.com/malafoss/docker-c64
 
 Based on:
 
