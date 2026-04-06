@@ -642,9 +642,6 @@ static void parse_arguments(int argc, char* argv[]) {
 }
 
 int main(int argc, char* argv[]) {
-    // Save original terminal state before anything touches it
-    struct termios orig_tio;
-    bool have_orig_tio = (tcgetattr(STDIN_FILENO, &orig_tio) == 0);
 
     parse_arguments(argc, argv);
     c64_init(&c64, &(c64_desc_t){
@@ -665,21 +662,22 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Graphics mode: %s\n", gfx_mode_name(gfx_mode));
     }
 
+    setlocale(LC_ALL, "C.utf8");
     if (gfx_mode != GFXMODE_NONE) {
-        // Graphics mode: put terminal in raw non-blocking mode
-        if (have_orig_tio) {
-            struct termios tio = orig_tio;
-            tio.c_lflag    &= ~(ICANON | ECHO);
-            tio.c_cc[VMIN]  = 0;
-            tio.c_cc[VTIME] = 0;
-            tcsetattr(STDIN_FILENO, TCSANOW, &tio);
-        }
-        // Hide cursor and clear screen
+        // Graphics mode: open /dev/tty for ncurses so it has a real terminal
+        // for input and terminal-mode setup, leaving stdout clean for graphics.
+        FILE *tty = fopen("/dev/tty", "r+");
+        newterm(NULL, tty ? tty : stderr, tty ? tty : stdin);
+        noecho();
+        curs_set(FALSE);
+        cbreak();
+        nodelay(stdscr, TRUE);
+        keypad(stdscr, TRUE);
+        // Hide cursor and clear screen on the real stdout
         write(STDOUT_FILENO, "\033[?25l\033[2J\033[H", 13);
         gfx_init(&gfx_state, gfx_mode);
     } else {
-        // Text mode: existing ncurses setup
-        setlocale(LC_ALL, "C.utf8");
+        // Text mode: full ncurses setup
         initscr();
         init_c64_colors();
         assume_default_colors(231, 16);  // white on true black
@@ -743,15 +741,8 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Keyboard input
-        int ch = ERR;
-        if (gfx_mode != GFXMODE_NONE) {
-            // Raw mode: read one byte non-blocking
-            uint8_t c;
-            if (read(STDIN_FILENO, &c, 1) == 1) ch = (int)c;
-        } else {
-            ch = getch();
-        }
+        // Keyboard input — both modes use ncurses getch()
+        int ch = getch();
 
         if (ch != ERR) {
             switch (ch) {
@@ -829,10 +820,7 @@ int main(int argc, char* argv[]) {
             "\033[H"      /* cursor home    */
             "\033[0m";    /* reset colors   */
         write(STDOUT_FILENO, reset, sizeof(reset) - 1);
-        if (have_orig_tio)
-            tcsetattr(STDIN_FILENO, TCSANOW, &orig_tio);
-    } else {
-        endwin();
     }
+    endwin();
     return 0;
 }
