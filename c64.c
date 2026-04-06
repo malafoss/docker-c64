@@ -659,7 +659,6 @@ int main(int argc, char* argv[]) {
     // Resolve auto-detection (gfx_detect handles raw mode internally)
     if (gfx_mode == GFXMODE_AUTO) {
         gfx_mode = gfx_detect();
-        fprintf(stderr, "Graphics mode: %s\n", gfx_mode_name(gfx_mode));
     }
 
     setlocale(LC_ALL, "C.utf8");
