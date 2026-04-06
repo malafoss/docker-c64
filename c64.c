@@ -150,26 +150,26 @@ static const char *font_map_lower[] = {
     "┏", "┻", "┳", "┫", "▏", "▍", "🮈", "🮃", "▀", "▃", "🭿", "▖", "▝", "┛", "▘", "▚", // 112
 };
 
-// C64 color palette as exact RGB values (based on Pepto's palette)
+// C64 color palette — Colodore (https://www.colodore.com), matches sixel.h _gfx_pal_*
 static const struct {
     uint8_t r, g, b;
 } c64_colors[16] = {
-    {0x00, 0x00, 0x00},  // 0: black
-    {0xFF, 0xFF, 0xFF},  // 1: white
-    {0x68, 0x37, 0x2B},  // 2: red
-    {0x70, 0xA4, 0xB2},  // 3: cyan
-    {0x6F, 0x3D, 0x86},  // 4: purple
-    {0x58, 0x8D, 0x43},  // 5: green
-    {0x35, 0x28, 0x79},  // 6: blue
-    {0xB8, 0xC7, 0x6F},  // 7: yellow
-    {0x6F, 0x4F, 0x25},  // 8: orange
-    {0x43, 0x39, 0x00},  // 9: brown
-    {0x9A, 0x67, 0x59},  // 10: light red
-    {0x44, 0x44, 0x44},  // 11: dark grey
-    {0x6C, 0x6C, 0x6C},  // 12: grey
-    {0x9A, 0xD2, 0x84},  // 13: light green
-    {0x6C, 0x5E, 0xB5},  // 14: light blue
-    {0x95, 0x95, 0x95},  // 15: light grey
+    {0x00, 0x00, 0x00},  // 0:  black
+    {0xff, 0xff, 0xff},  // 1:  white
+    {0x81, 0x33, 0x38},  // 2:  red
+    {0x75, 0xce, 0xc8},  // 3:  cyan
+    {0x8e, 0x3c, 0x97},  // 4:  purple
+    {0x56, 0xac, 0x4d},  // 5:  green
+    {0x2e, 0x2c, 0x9b},  // 6:  blue
+    {0xed, 0xf1, 0x71},  // 7:  yellow
+    {0x8e, 0x50, 0x29},  // 8:  orange
+    {0x55, 0x38, 0x00},  // 9:  brown
+    {0xc4, 0x6c, 0x71},  // 10: light red
+    {0x4a, 0x4a, 0x4a},  // 11: dark grey
+    {0x7b, 0x7b, 0x7b},  // 12: grey
+    {0xa9, 0xff, 0x9f},  // 13: light green
+    {0x70, 0x6d, 0xeb},  // 14: light blue
+    {0xb2, 0xb2, 0xb2},  // 15: light grey
 };
 
 static void init_c64_colors(void) {
@@ -705,7 +705,12 @@ int main(int argc, char* argv[]) {
 
     // Cleanup
     if (gfx_mode != GFXMODE_NONE) {
-        write(STDOUT_FILENO, "\033[?25h", 6);  // restore cursor
+        static const char reset[] =
+            "\033[?25h"   /* restore cursor */
+            "\033[2J"     /* clear screen   */
+            "\033[H"      /* cursor home    */
+            "\033[0m";    /* reset colors   */
+        write(STDOUT_FILENO, reset, sizeof(reset) - 1);
         if (have_orig_tio)
             tcsetattr(STDIN_FILENO, TCSANOW, &orig_tio);
     } else {

@@ -47,7 +47,6 @@
 /* Dirty-block tile dimensions */
 #define GFX_BLK_W   (8)     /* 1 VIC timing cycle = 8 pixels wide */
 #define GFX_BLK_H   (6)     /* 1 sixel band        = 6 pixels tall */
-#define GFX_COLS    (GFX_FB_W / GFX_BLK_W)   /* 48 */
 #define GFX_ROWS    (GFX_FB_H / GFX_BLK_H)   /* 45 */
 
 typedef enum {
@@ -163,7 +162,6 @@ static int _gfx_b64_encode(const uint8_t *in, int len, char *out) {
 */
 static void _gfx_present_sixel(gfx_state_t *st, const uint8_t *fb,
                                 bool first_frame) {
-    /* Mark dirty bands by comparing rows against prev_fb */
     bool dirty[GFX_ROWS];
     int  last_dirty = -1;
     for (int by = 0; by < GFX_ROWS; by++) {
@@ -173,7 +171,7 @@ static void _gfx_present_sixel(gfx_state_t *st, const uint8_t *fb,
             dirty[by] = false;
             int py0 = by * GFX_BLK_H;
             for (int r = 0; r < GFX_BLK_H && !dirty[by]; r++) {
-                if (memcmp(fb   + (py0 + r) * GFX_FB_STRIDE,
+                if (memcmp(fb        + (py0 + r) * GFX_FB_STRIDE,
                            st->prev_fb + (py0 + r) * GFX_FB_STRIDE,
                            GFX_FB_W) != 0)
                     dirty[by] = true;
@@ -181,19 +179,12 @@ static void _gfx_present_sixel(gfx_state_t *st, const uint8_t *fb,
         }
         if (dirty[by]) last_dirty = by;
     }
-    if (last_dirty < 0) return;  /* nothing changed */
+    if (last_dirty < 0) return;
 
-    /* Cursor to terminal origin */
     _gfx_write(st, "\033[H", 3);
+    /* P2=1 transparent keeps clean bands intact; P2=0 on first frame covers terminal background */
+    _gfx_write(st, first_frame ? "\033P0;0;0q" : "\033P0;1;0q", 8);
 
-    /* P2=1 for partial updates (transparent bg keeps clean bands intact).
-       P2=0 on first frame to fully cover any terminal background. */
-    if (first_frame)
-        _gfx_write(st, "\033P0;0;0q", 8);
-    else
-        _gfx_write(st, "\033P0;1;0q", 8);
-
-    /* Define all 16 palette colors once (RGB scaled to 0-100) */
     for (int ci = 0; ci < 16; ci++) {
         int r = (_gfx_pal_r[ci] * 100 + 127) / 255;
         int g = (_gfx_pal_g[ci] * 100 + 127) / 255;
@@ -201,23 +192,16 @@ static void _gfx_present_sixel(gfx_state_t *st, const uint8_t *fb,
         _gfx_printf(st, "#%d;2;%d;%d;%d", ci, r, g, b);
     }
 
-    /* Emit bands from 0 to last_dirty.
-       Clean bands: just '-' (advance, transparent — no screen change).
-       Dirty bands: full color-interlace sixel data. */
     for (int by = 0; by <= last_dirty; by++) {
         if (by > 0) _gfx_writec(st, '-');
-
-        if (!dirty[by]) continue;  /* clean: '-' already emitted, nothing more */
+        if (!dirty[by]) continue;
 
         int py0 = by * GFX_BLK_H;
-
-        /* Which colors appear in this band? */
         bool used[16] = {false};
         for (int r = 0; r < GFX_BLK_H; r++)
             for (int c = 0; c < GFX_FB_W; c++)
                 used[fb[(py0 + r) * GFX_FB_STRIDE + c]] = true;
 
-        /* One sixel pass per present color, $ (CR) between passes */
         bool first = true;
         for (int ci = 0; ci < 16; ci++) {
             if (!used[ci]) continue;
@@ -235,7 +219,6 @@ static void _gfx_present_sixel(gfx_state_t *st, const uint8_t *fb,
         }
     }
 
-    /* End DCS (ST) */
     _gfx_write(st, "\033\\", 2);
 }
 
@@ -548,16 +531,9 @@ static void gfx_present(gfx_state_t *st, const uint8_t *fb) {
         /* Sixel: partial band updates — dirty detection is inside the emitter */
         _gfx_present_sixel(st, fb, st->first_frame);
     } else {
-        /* Kitty: partial strip updates when cell_h known, full frame otherwise.
-           When all strips are clean, skip entirely. */
-        if (!st->first_frame && st->cell_h > 0) {
-            /* Quick full-frame check to skip entirely when nothing changed */
-            bool any = false;
-            for (int r = 0; r < GFX_FB_H && !any; r++)
-                if (memcmp(fb + r * GFX_FB_STRIDE, st->prev_fb + r * GFX_FB_STRIDE, GFX_FB_W))
-                    any = true;
-            if (!any) return;
-        } else if (!st->first_frame) {
+        /* Kitty: _gfx_present_kitty handles per-strip dirty detection when
+           cell_h is known, or full-frame skip when cell_h is 0. */
+        if (!st->first_frame && st->cell_h == 0) {
             if (memcmp(fb, st->prev_fb, (size_t)GFX_FB_STRIDE * GFX_FB_H) == 0)
                 return;
         }
